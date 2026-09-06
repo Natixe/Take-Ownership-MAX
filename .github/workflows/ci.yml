@@ -1,0 +1,55 @@
+name: CI Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build et tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Vérifier la syntaxe PowerShell
+        shell: powershell
+        run: |
+          $allErrors = @()
+          $tokens = $null
+          foreach ($path in @(git ls-files '*.ps1')) {
+            $parseErrors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $path), [ref]$tokens, [ref]$parseErrors)
+            foreach ($error in $parseErrors) { $allErrors += "${path}:$($error.Extent.StartLineNumber): $($error.Message)" }
+          }
+          if ($allErrors.Count -ne 0) { throw ($allErrors -join "`n") }
+
+      - name: Exécuter les tests du moteur
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+
+      - name: Exécuter les tests de la ligne de commande
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-CLI.ps1
+
+      - name: Vérifier le paquet distribuable
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
+
+      - name: Publier le paquet de la CI
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: TakeOwnershipMAX-ULTIMATE-v3
+          path: |
+            dist/TakeOwnershipMAX-ULTIMATE-v3.zip
+            dist/TakeOwnershipMAX-ULTIMATE-v3.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

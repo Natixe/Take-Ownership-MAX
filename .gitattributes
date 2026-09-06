@@ -1,2 +1,19 @@
-# Auto detect text files and perform LF normalization
+# Normalisation des fichiers texte
 * text=auto
+
+# Les scripts Windows conservent des fins de ligne natives.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Les fichiers affiches sur GitHub restent en LF.
+/.gitattributes text eol=lf
+/.gitignore text eol=lf
+*.cs text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Artefacts binaires
+*.dll binary
+*.pdb binary
+*.zip binary

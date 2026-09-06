@@ -1,0 +1,45 @@
+name: Publication GitHub
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Tester et publier
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Exécuter les tests du moteur
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+
+      - name: Exécuter les tests de la ligne de commande
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-CLI.ps1
+
+      - name: Construire et vérifier le paquet
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
+
+      - name: Créer la release GitHub
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            '.\dist\TakeOwnershipMAX-ULTIMATE-v3.zip#Archive Windows' `
+            '.\dist\TakeOwnershipMAX-ULTIMATE-v3.zip.sha256#Empreinte SHA-256' `
+            --verify-tag `
+            --generate-notes `
+            --title "Take Ownership MAX $env:GITHUB_REF_NAME"

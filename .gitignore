@@ -1,0 +1,32 @@
+# --- Sorties de build et de tests (regenerables) ---
+dist/
+.test-output/
+bin/
+obj/
+
+# Moteur compile : reconstruit par Build.ps1 ou a la volee par TakeOwnershipMAX.ps1
+*.dll
+*.pdb
+
+# --- Outils et reglages locaux ---
+graphify-out/
+.claude/
+
+# --- Editeurs et IDE ---
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userprefs
+
+# --- Bruit Windows ---
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- Fichiers temporaires ---
+*.tmp
+*.bak
+*~
