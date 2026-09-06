@@ -108,10 +108,8 @@ namespace Tomax
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder path, uint size, uint flags);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool GetVolumeInformationByHandleW(SafeFileHandle handle, StringBuilder label, uint labelSize, out uint serial, out uint maxComponent, out uint flags, StringBuilder fs, uint fsSize);
         [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeFileHandle handle, int kind, uint information, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
-        [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(SafeFileHandle handle, int kind, uint information, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+        [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, IntPtr descriptor);
         [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr sd);
-        [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetSecurityDescriptorOwner(IntPtr sd, out IntPtr owner, out bool defaulted);
-        [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetSecurityDescriptorDacl(IntPtr sd, out bool present, out IntPtr dacl, out bool defaulted);
         [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr pointer);
 
         internal static Win32Exception Error(string operation) { return new Win32Exception(Marshal.GetLastWin32Error(), operation); }
@@ -159,10 +157,10 @@ namespace Tomax
         public static ObjectHandle Open(string path, bool write, bool enumerate)
         {
             path = Normalize(path);
-            // MAXIMUM_ALLOWED suppresses SetSecurityInfo's automatic child propagation.
-            // Every existing child is backed up and changed separately. Share-delete is
-            // deliberately absent: an opened object cannot be replaced during the write.
-            uint access = write ? 0x02000000u : 0x00020080u;
+            // A write handle needs READ_CONTROL, WRITE_DAC, WRITE_OWNER and
+            // FILE_READ_ATTRIBUTES. Share-delete is deliberately absent: an opened
+            // object cannot be replaced while its identity and ACL are verified.
+            uint access = write ? 0x000E0080u : 0x00020080u;
             if (enumerate) access |= 1;
             var h = CreateFileW(path, access, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
             if (h.IsInvalid) { int error = Marshal.GetLastWin32Error(); h.Dispose(); throw new Win32Exception(error, "Ouverture : " + Display(path)); }
@@ -243,16 +241,16 @@ namespace Tomax
         public static void WriteSecurity(ObjectHandle item, string sddl)
         {
             var sd = new RawSecurityDescriptor(sddl); byte[] bytes = new byte[sd.BinaryLength]; sd.GetBinaryForm(bytes, 0);
+            bool wasProtected = (new RawSecurityDescriptor(ReadSecurity(item)).ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0;
+            uint protection = (sd.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0 ? 0x80000000u : (wasProtected ? 0x20000000u : 0u);
             GCHandle pin = GCHandle.Alloc(bytes, GCHandleType.Pinned);
             try
             {
-                IntPtr owner, dacl; bool ignored, present;
-                if (!GetSecurityDescriptorOwner(pin.AddrOfPinnedObject(), out owner, out ignored) ||
-                    !GetSecurityDescriptorDacl(pin.AddrOfPinnedObject(), out present, out dacl, out ignored)) throw Error("Descripteur invalide");
-                bool wasProtected = (new RawSecurityDescriptor(ReadSecurity(item)).ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0;
-                uint protection = (sd.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0 ? 0x80000000u : (wasProtected ? 0x20000000u : 0u);
-                // Only OWNER and DACL change; group, audit and integrity label remain untouched.
-                Check(SetSecurityInfo(item.Handle, 1, 5u | protection, owner, IntPtr.Zero, dacl, IntPtr.Zero), "Ecriture proprietaire / DACL");
+                // SetSecurityInfo walks inheritable DACLs into existing descendants.
+                // The low-level handle API changes only this identity-checked object;
+                // group, audit and integrity label remain untouched.
+                if (!SetKernelObjectSecurity(item.Handle, 5u | protection, pin.AddrOfPinnedObject()))
+                    throw Error("Ecriture proprietaire / DACL");
             }
             finally { pin.Free(); }
         }

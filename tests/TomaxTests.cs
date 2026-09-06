@@ -167,12 +167,16 @@ public static class TomaxTests
                 var report = new Engine().Run(operation, false, false);
                 Assert(report.Failed >= 1 && !report.Complete && report.Processed == 2, "missing object silently discarded");
             });
-            Test("verrou de contenu distingue des permissions", delegate {
+            Test("verrou de contenu compatible avec les permissions", delegate {
                 string dir = Fixture("scan-locked"), file = Path.Combine(dir, "busy.txt"); File.WriteAllText(file, "a");
                 using (var locked = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) {
                     var report = new Engine().Run(Engine.CreateOperation(backups, dir, "Repair", requester, false), false, false);
-                    Assert(report.ScanFailed == 0 && report.Inventoried == 2 && report.Failed >= 1 && !report.Complete, "content lock confused with metadata access");
+                    Assert(report.ScanFailed == 0 && report.Inventoried == 2, "content lock blocked metadata inventory");
+                    if (admin) Assert(report.Failed == 0 && report.Succeeded == 2 && report.Complete,
+                        "content lock blocked privileged metadata write");
+                    else Assert(report.Failed >= 1 && !report.Complete, "standard token unexpectedly changed protected metadata");
                 }
+                Assert(File.ReadAllText(file) == "a", "content changed while permissions were repaired");
             });
             Test("Restart Manager identifie le processus de test", delegate {
                 string file = Path.Combine(Fixture("locks"), "busy.txt"); File.WriteAllText(file, "a");
