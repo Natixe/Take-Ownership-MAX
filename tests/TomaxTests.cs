@@ -31,6 +31,20 @@ public static class TomaxTests
     static void Skip(string name) { skipped++; outcomes.Add("SKIP " + name); Console.WriteLine("SKIP " + name + " (administrateur requis)"); }
     static string Fixture(string name) { string path = Path.Combine(root, name); Directory.CreateDirectory(path); return path; }
     static string Security(string path) { using (var item = Native.Open(path, false, false)) return Native.ReadSecurity(item); }
+    static void AssertSecurity(string expected, string actual, string message)
+    {
+        Assert(Native.Equivalent(expected, actual), message + "\r\nEXPECTED " + expected + "\r\nACTUAL   " + actual);
+    }
+    static string LegacyInheritanceFixture(string name)
+    {
+        string dir = Path.Combine(root, name);
+        var acl = new DirectorySecurity();
+        // An explicit legacy parent makes inheritance reconstruction reproducible,
+        // independently of the ACLs of the developer's workspace or CI checkout.
+        acl.SetSecurityDescriptorSddlForm("O:BAG:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;OICIIO;GA;;;CO)");
+        Directory.CreateDirectory(dir, acl);
+        return dir;
+    }
     static void Write(string path, string sddl) { using (var item = Native.Open(path, true, false)) Native.WriteSecurity(item, sddl); }
     static string WithOwner(string sddl, string owner) { var sd = new RawSecurityDescriptor(sddl); sd.Owner = new SecurityIdentifier(owner); return sd.GetSddlForm(AccessControlSections.All); }
     static void Throws(Action action, string message) { try { action(); } catch { return; } throw new Exception(message); }
@@ -52,6 +66,8 @@ public static class TomaxTests
         requester = Requester.Capture();
         bool admin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
         Console.WriteLine("Fixtures : " + root + " ; admin=" + admin);
+        Console.WriteLine("CLR=" + Environment.Version + "; Process64Bit=" + Environment.Is64BitProcess);
+        using (var item = Native.Open(root, false, false)) Console.WriteLine("FileSystem=" + Native.FileSystem(item));
         Test("restauration de l'etat anterieur des privileges", delegate {
             string[] names = { "SeBackupPrivilege", "SeRestorePrivilege", "SeTakeOwnershipPrivilege", "SeSecurityPrivilege" };
             var before = new Dictionary<string, int>(); foreach (var name in names) before[name] = Native.PrivilegeAttributes(name);
@@ -116,16 +132,44 @@ public static class TomaxTests
                 }
             });
             if (admin)
+            {
                 Test("ecriture du parent sans propagation aux enfants, puis restauration", delegate {
                     string dir = Fixture("no-propagation"), child = Path.Combine(dir, "child.txt"); File.WriteAllText(child, "unchanged");
                     string beforeParent = Security(dir), beforeChild = Security(child);
                     string repaired = WithOwner(Native.RepairDescriptor(beforeParent, true, requester, true), requester.Sid);
-                    try { Write(dir, repaired); Assert(Native.Equivalent(beforeChild, Security(child)), "parent write changed child ACL before its backup"); }
+                    try { Write(dir, repaired); AssertSecurity(beforeChild, Security(child), "parent write changed child ACL before its backup"); }
                     finally { Write(dir, beforeParent); }
                     Assert(Native.Equivalent(beforeParent, Security(dir)), "parent restore failed");
+                    AssertSecurity(beforeChild, Security(child), "parent restore changed child ACL");
                     Assert(File.ReadAllText(child) == "unchanged", "file content changed");
                 });
-            else Skip("ecriture du parent sans propagation aux enfants, puis restauration");
+                Test("lecture des ACL legacy stable apres changement du parent", delegate {
+                    string dir = LegacyInheritanceFixture("legacy-read"), child = Path.Combine(dir, "child.txt");
+                    File.WriteAllText(child, "unchanged");
+                    string beforeParent = Security(dir), beforeChild = Security(child);
+                    string repaired = WithOwner(Native.RepairDescriptor(beforeParent, true, requester, true), requester.Sid);
+                    try {
+                        Write(dir, repaired);
+                        AssertSecurity(beforeChild, Security(child), "legacy child read depends on current parent ACL");
+                    }
+                    finally { Write(dir, beforeParent); }
+                    AssertSecurity(beforeParent, Security(dir), "legacy parent restore failed");
+                    AssertSecurity(beforeChild, Security(child), "legacy child changed during parent restore");
+                });
+                Test("lecture et restauration d'une DACL de plus de 1024 octets", delegate {
+                    string file = Path.Combine(Fixture("large-acl"), "data.txt"); File.WriteAllText(file, "preserved");
+                    string original = Security(file);
+                    var large = new StringBuilder("O:" + requester.Sid + "G:BAD:P(A;;FA;;;BA)(A;;FA;;;SY)");
+                    for (int i = 0; i < 80; i++) large.Append("(A;;FR;;;S-1-5-21-111-222-333-" + (2000 + i) + ")");
+                    string expected = large.ToString();
+                    Assert(new RawSecurityDescriptor(expected).BinaryLength > 1024, "fixture too small");
+                    try { Write(file, expected); AssertSecurity(expected, Security(file), "large DACL truncated or reconstructed"); }
+                    finally { Write(file, original); }
+                    AssertSecurity(original, Security(file), "large DACL restore failed");
+                    Assert(File.ReadAllText(file) == "preserved", "large DACL write changed content");
+                });
+            }
+            else { Skip("ecriture du parent sans propagation aux enfants, puis restauration"); Skip("lecture stable des ACL legacy"); Skip("lecture et restauration d'une grande DACL"); }
             Test("objets de plus de 260 caracteres", delegate {
                 string current = Native.Normalize(Fixture("long-path"));
                 for (int i = 0; i < 6; i++) { current += "\\" + new string((char)('a' + i), 48); if (!CreateDirectoryW(current, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error()); }
@@ -200,6 +244,22 @@ public static class TomaxTests
             });
             if (admin)
             {
+                Test("reparation et restauration exactes d'un arbre legacy", delegate {
+                    foreach (string mode in new[] { "Repair", "Ultimate" }) {
+                        string dir = LegacyInheritanceFixture("legacy-tree-" + mode), sub = Path.Combine(dir, "sub");
+                        Directory.CreateDirectory(sub); string file = Path.Combine(sub, "data.txt"); File.WriteAllText(file, "preserved");
+                        string a = Security(dir), b = Security(sub), c = Security(file);
+                        string operation = Engine.CreateOperation(backups, dir, mode, requester, false);
+                        var repair = new Engine().Run(operation, false, false);
+                        Assert(repair.Complete && repair.Succeeded == 3, mode + " legacy repair failed: " + File.ReadAllText(Path.Combine(operation, "events.jsonl")));
+                        var restore = new Engine().Run(operation, true, false);
+                        Assert(restore.Complete && restore.Succeeded == 3, mode + " legacy restore failed: " + File.ReadAllText(Path.Combine(operation, "events.jsonl")));
+                        AssertSecurity(a, Security(dir), mode + " legacy root not restored");
+                        AssertSecurity(b, Security(sub), mode + " legacy subdirectory not restored");
+                        AssertSecurity(c, Security(file), mode + " legacy file not restored");
+                        Assert(File.ReadAllText(file) == "preserved", "legacy file content changed");
+                    }
+                });
                 Test("reparation privilegiee d'un arbre refuse et restauration", delegate {
                     string dir = Fixture("denied"), sub = Path.Combine(dir, "sub"); Directory.CreateDirectory(sub);
                     string file = Path.Combine(sub, "secret.txt"); File.WriteAllText(file, "preserved bytes");
@@ -235,15 +295,18 @@ public static class TomaxTests
                     Assert(new Engine().Run(operation, true, true).Complete, "explicit overwrite failed");
                 });
                 Test("remplacement d'un fichier refuse", delegate {
-                    string dir = Fixture("replaced"), file = Path.Combine(dir, "a.txt"); File.WriteAllText(file, "a");
+                    string dir = LegacyInheritanceFixture("replaced"), file = Path.Combine(dir, "a.txt"); File.WriteAllText(file, "a");
                     string operation = Engine.CreateOperation(backups, dir, "Repair", requester, false);
                     var scan = new Engine(); scan.Progress = delegate(ProgressInfo p) { if (p.Phase == "Scanning" && p.Processed == 2) scan.CancellationRequested = true; };
                     scan.Run(operation, false, false); File.Delete(file); File.WriteAllText(file, "replacement"); File.SetCreationTimeUtc(file, DateTime.UtcNow.AddDays(-3));
                     string before = Security(file); var report = new Engine().Run(operation, false, false);
-                    Assert(report.Failed == 1 && Native.Equivalent(before, Security(file)), "replacement altered");
+                    Assert(report.Failed == 1 && report.Succeeded == 1 && !report.Complete,
+                        "replacement not refused: " + File.ReadAllText(Path.Combine(operation, "events.jsonl")));
+                    AssertSecurity(before, Security(file), "replacement altered");
+                    Assert(File.ReadAllText(file) == "replacement", "replacement content altered");
                 });
             }
-            else { Skip("reparation privilegiee et restauration"); Skip("reprise des ecritures/restauration"); Skip("conflits de restauration"); Skip("remplacement de fichier"); }
+            else { Skip("reparation et restauration d'un arbre legacy"); Skip("reparation privilegiee et restauration"); Skip("reprise des ecritures/restauration"); Skip("conflits de restauration"); Skip("remplacement de fichier"); }
             if (Array.IndexOf(args, "--stress") >= 0)
                 Test("plus de 5000 objets sans troncature", delegate {
                     string dir = Fixture("stress-5002"); for (int i = 0; i < 5002; i++) File.WriteAllText(Path.Combine(dir, i + ".txt"), "");

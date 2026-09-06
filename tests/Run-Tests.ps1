@@ -16,6 +16,10 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $taskAdmin = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $taskLog = Join-Path $repo ('.test-output\progress-' + $(if ($taskAdmin) { 'admin' } else { 'standard' }) + '.txt')
 Set-Content -LiteralPath $taskLog -Value "Stress requested: $([bool]$Stress)" -Encoding UTF8
+$windows = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$environmentInfo = "Windows build=$($windows.CurrentBuild).$($windows.UBR); Edition=$($windows.EditionID); PowerShell=$($PSVersionTable.PSVersion)"
+Add-Content -LiteralPath $taskLog -Value $environmentInfo -Encoding UTF8
+Write-Output $environmentInfo
 if ($Stress) {
     & $exe --stress | ForEach-Object { Add-Content -LiteralPath $taskLog -Value $_ -Encoding UTF8; Write-Output $_ }
 } else {

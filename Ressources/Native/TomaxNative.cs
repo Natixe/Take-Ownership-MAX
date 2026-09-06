@@ -107,10 +107,8 @@ namespace Tomax
         [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int kind, IntPtr data, uint size);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder path, uint size, uint flags);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool GetVolumeInformationByHandleW(SafeFileHandle handle, StringBuilder label, uint labelSize, out uint serial, out uint maxComponent, out uint flags, StringBuilder fs, uint fsSize);
-        [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeFileHandle handle, int kind, uint information, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+        [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetKernelObjectSecurity(SafeFileHandle handle, uint information, [Out] byte[] descriptor, uint length, out uint needed);
         [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, IntPtr descriptor);
-        [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr sd);
-        [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr pointer);
 
         internal static Win32Exception Error(string operation) { return new Win32Exception(Marshal.GetLastWin32Error(), operation); }
         internal static void Check(uint code, string operation) { if (code != 0) throw new Win32Exception((int)code, operation + " (Windows " + code + " : " + new Win32Exception((int)code).Message + ")"); }
@@ -229,14 +227,21 @@ namespace Tomax
         }
         public static string ReadSecurity(ObjectHandle item)
         {
-            IntPtr owner, group, dacl, sacl, sd;
-            Check(GetSecurityInfo(item.Handle, 1, 7, out owner, out group, out dacl, out sacl, out sd), "Lecture du descripteur");
-            try
+            // Read the stored descriptor, not GetSecurityInfo's reconstruction of
+            // legacy inheritance from the current parent. That reconstruction can
+            // change ACE flags and DACL protection even when this object is untouched.
+            byte[] bytes = new byte[1024];
+            for (int attempt = 0; attempt < 4; attempt++)
             {
-                byte[] bytes = new byte[GetSecurityDescriptorLength(sd)]; Marshal.Copy(sd, bytes, 0, bytes.Length);
-                return new RawSecurityDescriptor(bytes, 0).GetSddlForm(AccessControlSections.Owner | AccessControlSections.Group | AccessControlSections.Access);
+                uint needed;
+                if (GetKernelObjectSecurity(item.Handle, 7, bytes, (uint)bytes.Length, out needed))
+                    return new RawSecurityDescriptor(bytes, 0).GetSddlForm(AccessControlSections.Owner | AccessControlSections.Group | AccessControlSections.Access);
+                int error = Marshal.GetLastWin32Error();
+                if (error != 122) throw new Win32Exception(error, "Lecture du descripteur");
+                if (needed <= bytes.Length || needed > 1024 * 1024) throw new IOException("Taille de descripteur invalide.");
+                bytes = new byte[needed];
             }
-            finally { LocalFree(sd); }
+            throw new IOException("Le descripteur change continuellement pendant sa lecture.");
         }
         public static void WriteSecurity(ObjectHandle item, string sddl)
         {
